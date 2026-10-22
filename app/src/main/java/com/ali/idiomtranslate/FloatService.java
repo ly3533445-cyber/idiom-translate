@@ -247,7 +247,7 @@ public class FloatService extends Service {
         JSONObject body = new JSONObject().put("model", model).put("messages", new JSONArray()
                 .put(new JSONObject().put("role", "system").put("content", system))
                 .put(new JSONObject().put("role", "user").put("content", parts)));
-        HttpURLConnection c = (HttpURLConnection) new URL("https://openrouter.ai/api/v1/chat/completions").openConnection();
+        HttpURLConnection c = (HttpURLConnection) new URL("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions").openConnection();
         c.setRequestMethod("POST");
         c.setConnectTimeout(20000);
         c.setReadTimeout(90000);
