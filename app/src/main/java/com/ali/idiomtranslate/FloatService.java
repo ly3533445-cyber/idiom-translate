@@ -9,6 +9,12 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
@@ -44,6 +50,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -59,6 +67,9 @@ public class FloatService extends Service {
     private Handler bg, main;
     private TextView btn, result;
     private View panel;
+    private OverlayView ov;
+    private Bitmap shot;
+    private WindowManager.LayoutParams btnLp;
     private boolean busy;
     private int sw, sh;
 
@@ -124,6 +135,7 @@ public class FloatService extends Service {
         final WindowManager.LayoutParams lp = new WindowManager.LayoutParams(dp(56), dp(56),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+        btnLp = lp;
         lp.gravity = Gravity.TOP | Gravity.START;
         lp.x = sw - dp(64);
         lp.y = sh / 3;
@@ -186,6 +198,7 @@ public class FloatService extends Service {
     }
 
     private void onTap() {
+        if (ov != null) { clearOverlay(); return; }
         if (busy) return;
         busy = true;
         panel.setVisibility(View.GONE);
@@ -206,10 +219,18 @@ public class FloatService extends Service {
             show("جاري الترجمة...");
             final String img = b64;
             net.execute(() -> {
-                String out;
-                try { out = translate(img); } catch (Exception e) { out = "⚠ " + e.getMessage(); }
-                final String o = out;
-                main.post(() -> { show(o); busy = false; });
+                String out = null, err = null;
+                List<Item> items = null;
+                try { out = translate(img); items = parseItems(out); } catch (Exception e) { err = "⚠ " + e.getMessage(); }
+                final String o = out, er = err;
+                final List<Item> its = items;
+                main.post(() -> {
+                    shot = null;
+                    if (er != null) show(er);
+                    else if (its == null || its.isEmpty()) show(o);
+                    else { panel.setVisibility(View.GONE); showOverlay(its); }
+                    busy = false;
+                });
             });
         }, 700);
     }
@@ -227,6 +248,7 @@ public class FloatService extends Service {
             full.copyPixelsFromBuffer(buf);
             bmp = Bitmap.createBitmap(full, 0, 0, iw, ih);
         }
+        shot = bmp;
         float s = Math.min(1f, 1600f / Math.max(bmp.getWidth(), bmp.getHeight()));
         if (s < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.round(bmp.getWidth() * s), Math.round(bmp.getHeight() * s), true);
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -241,8 +263,11 @@ public class FloatService extends Service {
         String lang = sp.getString("lang", "العربية الفصحى المبسطة");
         String system = "You translate English into " + lang + ". Translate by meaning, never word for word: "
                 + "idioms, slang and phrasal verbs must be rendered with a natural equivalent expression. "
-                + "Output ONLY the translation of all text visible in the screenshot, keeping the same order and line breaks. "
-                + "No explanations, no notes, no lists, no headings, and no markdown symbols (no #, *, or bold). Plain text only.";
+                + "Find each separate block of English text in the screenshot (a sentence, paragraph, label or button). "
+                + "Reply with JSON only, no markdown fences, exactly in this shape: "
+                + "{\"items\":[{\"box_2d\":[ymin,xmin,ymax,xmax],\"text\":\"translation\"}]} "
+                + "box_2d is the tight bounding box of the original text block, normalized to 0-1000 (y first, then x). "
+                + "Skip text that is already Arabic, plain numbers and icons. text contains only the translation, no notes.";
         JSONArray parts = new JSONArray()
                 .put(new JSONObject().put("type", "text").put("text", "Translate the text in this screenshot."))
                 .put(new JSONObject().put("type", "image_url")
@@ -269,7 +294,105 @@ public class FloatService extends Service {
         return j.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
     }
 
+
+    static class Item { RectF r; String t; int bg, fg; }
+
+    private List<Item> parseItems(String c) {
+        try {
+            int a = c.indexOf('{'), b = c.lastIndexOf('}');
+            if (a < 0 || b <= a) return null;
+            JSONArray arr = new JSONObject(c.substring(a, b + 1)).getJSONArray("items");
+            Bitmap bm = shot;
+            List<Item> list = new ArrayList<>();
+            float pad = dp(2);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                JSONArray bx = o.getJSONArray("box_2d");
+                float y0 = (float) bx.getDouble(0) / 1000f * sh, x0 = (float) bx.getDouble(1) / 1000f * sw;
+                float y1 = (float) bx.getDouble(2) / 1000f * sh, x1 = (float) bx.getDouble(3) / 1000f * sw;
+                Item it = new Item();
+                it.r = new RectF(Math.min(x0, x1) - pad, Math.min(y0, y1) - pad, Math.max(x0, x1) + pad, Math.max(y0, y1) + pad);
+                it.t = o.getString("text");
+                it.bg = bm != null ? sample(bm, it.r) : Color.BLACK;
+                int r = Color.red(it.bg), g = Color.green(it.bg), bl = Color.blue(it.bg);
+                it.fg = (0.299 * r + 0.587 * g + 0.114 * bl) > 140 ? Color.BLACK : Color.WHITE;
+                list.add(it);
+            }
+            return list;
+        } catch (Exception e) { return null; }
+    }
+
+    private int sample(Bitmap bm, RectF r) {
+        float fx = bm.getWidth() / (float) sw, fy = bm.getHeight() / (float) sh;
+        float[] xs = { r.left + 3, r.right - 3, r.left + 3, r.right - 3 };
+        float[] ys = { r.top + 3, r.top + 3, r.bottom - 3, r.bottom - 3 };
+        int sr = 0, sg = 0, sb = 0;
+        for (int i = 0; i < 4; i++) {
+            int x = Math.max(0, Math.min(bm.getWidth() - 1, Math.round(xs[i] * fx)));
+            int y = Math.max(0, Math.min(bm.getHeight() - 1, Math.round(ys[i] * fy)));
+            int px = bm.getPixel(x, y);
+            sr += Color.red(px); sg += Color.green(px); sb += Color.blue(px);
+        }
+        return Color.rgb(sr / 4, sg / 4, sb / 4);
+    }
+
+    private void showOverlay(List<Item> items) {
+        clearOverlay();
+        ov = new OverlayView(items);
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(sw, sh,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.START;
+        if (Build.VERSION.SDK_INT >= 28) lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        wm.addView(ov, lp);
+        // keep the floating button above the overlay
+        try { wm.removeView(btn); wm.addView(btn, btnLp); } catch (Exception e) { }
+    }
+
+    private void clearOverlay() {
+        if (ov != null) {
+            try { wm.removeView(ov); } catch (Exception e) { }
+            ov = null;
+        }
+    }
+
+    private class OverlayView extends View {
+        private final List<Item> items;
+        private final Paint bgp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+
+        OverlayView(List<Item> its) { super(FloatService.this); items = its; }
+
+        @Override protected void onDraw(Canvas c) {
+            float pad = dp(3);
+            for (Item it : items) {
+                int w = Math.max(dp(24), Math.round(it.r.width() - 2 * pad));
+                float size = Math.min(it.r.height() * 0.75f, dp(40));
+                float min = dp(9);
+                StaticLayout sl;
+                while (true) {
+                    tp.setTextSize(size);
+                    tp.setColor(it.fg);
+                    sl = StaticLayout.Builder.obtain(it.t, 0, it.t.length(), tp, w)
+                            .setAlignment(Layout.Alignment.ALIGN_NORMAL).build();
+                    if (sl.getHeight() <= it.r.height() - 2 * pad || size <= min) break;
+                    size -= dp(1);
+                }
+                float h = Math.max(it.r.height(), sl.getHeight() + 2 * pad);
+                bgp.setColor(it.bg);
+                c.drawRoundRect(it.r.left, it.r.top, it.r.right, it.r.top + h, dp(4), dp(4), bgp);
+                c.save();
+                c.translate(it.r.left + pad, it.r.top + pad);
+                sl.draw(c);
+                c.restore();
+            }
+        }
+    }
+
     @Override public void onDestroy() {
+        clearOverlay();
         try { if (btn != null) wm.removeView(btn); } catch (Exception e) { }
         try { if (panel != null) wm.removeView(panel); } catch (Exception e) { }
         synchronized (lock) { if (latest != null) { latest.close(); latest = null; } }
