@@ -91,7 +91,7 @@ public class FloatService extends Service {
             synchronized (lock) { if (latest != null) latest.close(); latest = img; }
         }, bg);
         vd = mp.createVirtualDisplay("cap", sw, sh, dpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.getSurface(), null, null);
+                null, null, null);
         buildUi();
         return START_NOT_STICKY;
     }
@@ -190,9 +190,13 @@ public class FloatService extends Service {
         busy = true;
         panel.setVisibility(View.GONE);
         btn.setVisibility(View.INVISIBLE);
+        synchronized (lock) { if (latest != null) { latest.close(); latest = null; } }
+        vd.setSurface(reader.getSurface());
         main.postDelayed(() -> {
             String b64 = null, err = null;
             try { b64 = captureB64(); } catch (Exception e) { err = e.toString(); }
+            vd.setSurface(null);
+            synchronized (lock) { if (latest != null) { latest.close(); latest = null; } }
             btn.setVisibility(View.VISIBLE);
             if (b64 == null) {
                 show(err != null ? err : "ما انلقطت صورة. حرّك الشاشة شوي وجرب مرة ثانية.");
@@ -207,7 +211,7 @@ public class FloatService extends Service {
                 final String o = out;
                 main.post(() -> { show(o); busy = false; });
             });
-        }, 350);
+        }, 700);
     }
 
     private String captureB64() {
@@ -237,9 +241,8 @@ public class FloatService extends Service {
         String lang = sp.getString("lang", "العربية الفصحى المبسطة");
         String system = "You translate English into " + lang + ". Translate by meaning, never word for word: "
                 + "idioms, slang and phrasal verbs must be rendered with a natural equivalent expression. "
-                + "Output: 1) the natural translation of all text visible in the screenshot; "
-                + "2) a short list titled \"اصطلاحات وكلمات صعبة\" explaining each idiom or hard word in one line, "
-                + "with its literal meaning if it differs.";
+                + "Output ONLY the translation of all text visible in the screenshot, keeping the same order and line breaks. "
+                + "No explanations, no notes, no lists, no headings, and no markdown symbols (no #, *, or bold). Plain text only.";
         JSONArray parts = new JSONArray()
                 .put(new JSONObject().put("type", "text").put("text", "Translate the text in this screenshot."))
                 .put(new JSONObject().put("type", "image_url")
